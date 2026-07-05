@@ -374,12 +374,24 @@ write.csv(class_summary, file.path(out_dir, "lca_class_summary.csv"), row.names 
 
 ```{r fig2-lca, fig.height=6.6, fig.width=6.9}
 ind_order <- prof$indicator
+# Every Figure 2 label carries its reference period, taken from the codebook's
+# question wording: items asked as present-tense statements or hypotheticals
+# are marked "currently"; "treated unfairly" is asked as a lifetime experience.
+win_fix <- c(low_self_esteem = "Low self-esteem (currently)",
+             low_caregiver_supp = "Low perceived caregiver support (currently)",
+             unfair_treatment = "Treated unfairly at school (ever)",
+             unsafe_streets = "Feels unsafe on the streets (currently)",
+             drugs_nearby = "Drugs sold near home (currently)",
+             victim_blame = "Victim-blaming attitude (currently)",
+             hiv_stigma = "HIV-related stigma (currently)",
+             contra_barrier = "Contraception access barrier (currently)")
+lab_fig2 <- ind_labels; lab_fig2[names(win_fix)] <- win_fix
 prof_long <- as_tibble(profiles, rownames = "indicator") %>%
   pivot_longer(-indicator, names_to = "class", values_to = "p") %>%
   left_join(prof %>% select(indicator, overall = prev_pct), by = "indicator") %>%
   mutate(p = 100 * p,
          construct = factor(ind_construct[indicator], levels = names(pal_construct)),
-         label = factor(ind_labels[indicator], levels = rev(ind_labels[ind_order])),
+         label = factor(lab_fig2[indicator], levels = rev(lab_fig2[ind_order])),
          class = factor(class, levels = class_summary$class))
 facet_lab <- setNames(paste0(class_summary$class, "\n(", class_summary$share_pct, "% of students)"),
                       class_summary$class)
@@ -642,6 +654,40 @@ write.csv(edges, file.path(out_dir, "network_edges.csv"), row.names = FALSE)
 write.csv(bridge_tab, file.path(out_dir, "network_bridges.csv"), row.names = FALSE)
 write.csv(tibble(statistic = names(cs), cs = as.numeric(cs), complete_case_n = nrow(cc), gate_pass = net_ok),
           file.path(out_dir, "network_stability.csv"), row.names = FALSE)
+```
+
+```{r network-ames}
+# Plain-language translation of edge weights to the probability scale.
+# For each complete-case student, the fitted Ising conditionals (thresholds
+# plus weights) predict the probability of the target item when the source
+# item is set to 1 and when it is set to 0, holding the student's other 25
+# items at their observed values; the average difference is the average
+# marginal effect (AME) in percentage points -- directly readable, unlike a
+# log-odds weight.
+ame_edge <- function(source, target) {
+  X <- as.matrix(cc)
+  th <- net$results$thresholds[match(target, colnames(X))]
+  w <- net$graph[, target]
+  others <- setdiff(colnames(X), c(source, target))
+  base <- as.numeric(X[, others, drop = FALSE] %*% w[others]) + th
+  mean(plogis(base + w[source]) - plogis(base))
+}
+edge_ames <- edges %>%
+  head(12) %>%
+  mutate(ame_pp = round(100 * mapply(ame_edge, from, to), 1),
+         from = ind_labels[from], to = ind_labels[to])
+kable(edge_ames, caption = "Twelve strongest edges translated to average marginal effects (percentage points: average change in the predicted probability of the second item when the first switches from 0 to 1, other items held at observed values).")
+write.csv(edge_ames, file.path(out_dir, "network_edge_ames.csv"), row.names = FALSE)
+# The two edges narrated in the manuscript, in the direction of the narrative.
+ame_tm <- round(100 * ame_edge("tobacco_30d", "marijuana_30d"), 1)
+ame_sc <- round(100 * ame_edge("ever_sex", "contra_barrier"), 1)
+chk5c <- tibble(
+  check = c("tobacco-marijuana AME positive", "sexual-activity-barrier AME negative",
+            "AME signs match edge-weight signs (12 strongest)"),
+  pass = c(ame_tm > 0, ame_sc < 0, all(sign(edge_ames$ame_pp) == sign(edge_ames$weight))))
+kable(chk5c, caption = paste0("Verification check 5c. Probability translations (tobacco->marijuana ",
+                              ame_tm, " pp; sexual activity->access barrier ", ame_sc, " pp)."))
+stopifnot(all(chk5c$pass))
 ```
 
 ```{r fig3-network, fig.width=6.9, fig.height=5.6, dpi=300}
