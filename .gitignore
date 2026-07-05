@@ -1,0 +1,23 @@
+# Data (never tracked)
+*.csv
+*.xlsx
+*.sav
+*.dta
+
+# Generated outputs
+tcc_analysis4_outputs/
+*_cache/
+*_files/
+*.docx
+*.pdf
+*.png
+*.svg
+*.knit.md
+
+# R session artifacts
+.Rhistory
+.RData
+.Rproj.user/
+
+# Exceptions
+!data/README.md

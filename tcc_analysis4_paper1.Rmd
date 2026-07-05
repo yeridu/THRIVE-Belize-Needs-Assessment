@@ -1,0 +1,1063 @@
+---
+output:
+  word_document:
+    reference_docx: "C:/Users/yerid/Documents/reference_doc.docx"
+    fig_caption: true
+    md_extensions: "-autolink_bare_uris"
+---
+
+**Confirmatory Analysis for Paper 1, revision 3 (implements Plan_v5 start to finish)**
+
+**Co-occurring Adolescent Health Risks and Life-Skills Needs at Toledo Community College, Punta Gorda, Belize: A School-Based Needs Assessment**
+
+Mario Morales, Aimee Slagle, Gabriela Valdez
+
+2026-07-04
+
+**Purpose of this script.** This pipeline implements Plan_v5: the 27 program-blind indicators of Plan_v4 with time windows now written into every retrospective label; the new priority-and-support cascade (Figure 4), adapted from the intersectional priority cascade and care-continuum literature named in Plan_v5; the list experiments retained but exported as supplementary material (Figure S3, Table S6); and table notes set at 11 points with single spacing. Every number, table, and figure for the v6 manuscript is produced here and exported to tcc_analysis4_outputs/.
+
+```{r setup, include=FALSE}
+# ============================================================================
+# GLOBAL SETUP -- style system per BestPaperStyle.md (Arial, validated
+# Okabe-Ito palette anchored to construct classes, booktabs flextables,
+# vector PDF + 600-dpi PNG exports, no embedded figure titles). Table notes
+# are 11 pt, single-spaced (Plan_v5 decision 4).
+# ============================================================================
+library(poLCA)       # latent class analysis (attaches MASS; loaded FIRST so
+                     # tidyverse's select()/filter() are not masked)
+library(bootnet)     # network estimation + bootstrap stability
+library(IsingFit)    # eLasso/IsingFit binary network estimator
+library(qgraph)      # network drawing
+library(tidyverse)   # data wrangling and ggplot2
+library(knitr)       # kable() for internal QC tables only
+library(flextable)   # booktabs display tables exported as editable Word
+select <- dplyr::select; filter <- dplyr::filter
+
+fig_family <- "Arial"
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE, include = TRUE,
+  fig.width = 6.5, fig.height = 4.2, dpi = 300, dev = "ragg_png"
+)
+out_dir <- "tcc_analysis4_outputs"
+if (!dir.exists(out_dir)) dir.create(out_dir)
+
+pal_construct <- c("Mental health/self-perception" = "#0072B2",
+                   "Behavior"                      = "#D55E00",
+                   "Experience/exposure"           = "#56B4E9",
+                   "Knowledge/access/support need" = "#009E73",
+                   "Attitude"                      = "#CC79A7")
+col_observed <- "#0072B2"; col_null <- "#4D4D4D"; col_direct <- "#D55E00"
+pal_cascade <- c("#B8D8EC", "#7FB8DC", "#3F8FC4", "#0072B2")  # one hue, light to dark
+
+theme_pub <- function(base = 9, grid_y = FALSE) {
+  th <- theme_minimal(base_family = fig_family, base_size = base) +
+    theme(panel.grid = element_blank(),
+          axis.line = element_line(color = "black", linewidth = 0.3),
+          axis.ticks = element_line(color = "black", linewidth = 0.3),
+          axis.text = element_text(color = "black", size = base - 1),
+          axis.title = element_text(face = "bold", size = base),
+          strip.text = element_text(face = "bold", size = base, color = "black"),
+          legend.text = element_text(size = base - 1),
+          legend.title = element_blank(),
+          legend.position = "bottom",
+          plot.background = element_rect(fill = "white", color = NA))
+  if (grid_y) th <- th + theme(panel.grid.major.y = element_line(color = "#E8E8E8", linewidth = 0.3))
+  th
+}
+save_fig <- function(p, name, w = 6.5, h = 4.2) {
+  ggsave(file.path(out_dir, paste0(name, ".png")), p, width = w, height = h,
+         dpi = 600, bg = "white", device = ragg::agg_png)
+  tryCatch(
+    ggsave(file.path(out_dir, paste0(name, ".pdf")), p, width = w, height = h,
+           device = cairo_pdf, bg = "white"),
+    error = function(e) ggsave(file.path(out_dir, paste0(name, ".svg")), p,
+                               width = w, height = h, bg = "white"))
+}
+flex_pub <- function(df, col_labels = NULL, note = NULL, num_cols = NULL, autofit = TRUE) {
+  ft <- flextable(df)
+  if (!is.null(col_labels)) ft <- set_header_labels(ft, values = col_labels)
+  ft <- border_remove(ft) %>%
+    hline_top(part = "header", border = officer::fp_border(color = "black", width = 1.5)) %>%
+    hline_bottom(part = "header", border = officer::fp_border(color = "black", width = 0.75)) %>%
+    hline_bottom(part = "body", border = officer::fp_border(color = "black", width = 1.5)) %>%
+    bold(part = "header") %>%
+    font(fontname = "Times New Roman", part = "all") %>%
+    fontsize(size = 10, part = "all") %>%
+    padding(padding.top = 2, padding.bottom = 2, part = "all") %>%
+    align(align = "left", part = "all")
+  if (!is.null(num_cols)) ft <- align(ft, j = num_cols, align = "right", part = "all")
+  if (!is.null(note)) ft <- add_footer_lines(ft, values = note) %>%
+    font(fontname = "Times New Roman", part = "footer") %>%
+    fontsize(size = 11, part = "footer") %>% italic(part = "footer") %>%
+    line_spacing(space = 1, part = "footer")
+  if (autofit) ft <- autofit(ft)
+  ft
+}
+save_tab <- function(ft, name) save_as_docx(ft, path = file.path(out_dir, paste0(name, ".docx")))
+```
+
+**Step 1. Data, analytic sample, and structural verification**
+
+```{r data}
+d0 <- read.csv("../tcc_data_paper1.csv")
+d1 <- d0 %>% filter(consent %in% c(1, 2))
+NA99 <- function(x) ifelse(x == 99, NA, x)
+N_analytic <- nrow(d1)
+
+chk1 <- tibble(
+  check = c("source rows = 510", "source columns = 65", "analytic N = 497",
+            "full-file treatment arms = 129/129/128/124",
+            "analytic-sample treatment arms = 124/127/126/120"),
+  pass = c(nrow(d0) == 510, ncol(d0) == 65, N_analytic == 497,
+           all(as.integer(table(d0$treatment)) == c(129, 129, 128, 124)),
+           all(as.integer(table(d1$treatment)) == c(124, 127, 126, 120))))
+kable(chk1, caption = "Verification check 1. Dataset structure. Every row must read TRUE.")
+stopifnot(all(chk1$pass))
+```
+
+```{r indicators}
+# ============================================================================
+# THE 27 PROGRAM-BLIND INDICATORS (Plan_v4 Part C, unchanged definitions).
+# Labels now carry each retrospective item's time window (Plan_v5 decision 7);
+# items without a window ask about the student's current situation.
+# ============================================================================
+mk <- function(cond, base) ifelse(cond, 1, ifelse(!is.na(base), 0, NA))
+# The builder is a function so the consent-affirmed sensitivity analysis
+# (Step 9c) applies IDENTICAL definitions to its subsample.
+build_indicators <- function(d1) with(d1, data.frame(
+  low_self_esteem    = mk(NA99(myself)        %in% 1:2, NA99(myself)),
+  low_caregiver_supp = mk(NA99(parentshappy)  %in% 1:2, NA99(parentshappy)),
+  witnessed_violence = mk(NA99(attacked)      == 1,     NA99(attacked)),
+  unfair_treatment   = mk(NA99(treatedunfair) %in% 3:4, NA99(treatedunfair)),
+  unsafe_streets     = mk(NA99(safestreets)   %in% 3:4, NA99(safestreets)),
+  drugs_nearby       = mk(NA99(drugshome)     %in% 1:3, NA99(drugshome)),
+  witnessed_ipv      = mk(NA99(ipv)           %in% 2:4, NA99(ipv)),
+  victim_blame       = mk(NA99(sexdrunk)      %in% 3:4, NA99(sexdrunk)),
+  alcohol_30d        = mk(NA99(drinking)      %in% 3:7, NA99(drinking)),
+  home_alcohol       = mk(NA99(drinkinghome)  %in% 3:5, NA99(drinkinghome)),
+  tobacco_30d        = mk(NA99(nicotine)      %in% 2:6, NA99(nicotine)),
+  marijuana_30d      = mk(NA99(marijuana)     %in% 2:6, NA99(marijuana)),
+  vaped_ever         = mk(NA99(vaped)         == 2,     NA99(vaped)),
+  poor_mh            = mk(NA99(mhealth)       %in% 4:5, NA99(mhealth)),
+  unmet_mh_help      = mk(NA99(mhealthelp)    %in% 1:2, NA99(mhealthelp)),
+  bullied_school     = mk(NA99(bullyschool)   == 1,     NA99(bullyschool)),
+  bullied_online     = mk(NA99(bullymedia)    == 1,     NA99(bullymedia)),
+  self_harm          = mk(NA99(selfharm)      == 1,     NA99(selfharm)),
+  suicide_attempt    = mk(NA99(triedsuicide)  == 1,     NA99(triedsuicide)),
+  short_sleep        = mk(NA99(sleep)         %in% 1:3, NA99(sleep)),
+  ever_sex           = mk(NA99(sexage)        %in% 2:7, NA99(sexage)),
+  skips_breakfast    = mk(NA99(breakfast)     %in% 1:4, NA99(breakfast)),
+  food_insecure      = mk(NA99(nofood)        %in% 3:5, NA99(nofood)),
+  low_phys_activity  = mk(NA99(phyact)        %in% 1:5, NA99(phyact)),
+  hiv_unaware        = mk(NA99(hivknow)       == 1,     NA99(hivknow)),
+  hiv_stigma         = mk(NA99(hivclass)      == 1,     NA99(hivclass)),
+  contra_barrier     = mk(NA99(contraceptioneed) %in% 2:4, NA99(contraceptioneed))
+))
+R <- build_indicators(d1)
+ind_labels <- c(
+  low_self_esteem = "Low self-esteem", low_caregiver_supp = "Low perceived caregiver support",
+  witnessed_violence = "Witnessed neighborhood violence (ever)",
+  unfair_treatment = "Treated unfairly at school",
+  unsafe_streets = "Feels unsafe on the streets", drugs_nearby = "Drugs sold near home",
+  witnessed_ipv = "Witnessed interparental violence (12 months)",
+  victim_blame = "Victim-blaming attitude",
+  alcohol_30d = "Any alcohol use (30 days)",
+  home_alcohol = "Home alcohol exposure (weekly+, 30 days)",
+  tobacco_30d = "Tobacco use (30 days)", marijuana_30d = "Marijuana use (30 days)",
+  vaped_ever = "Ever vaped", poor_mh = "Frequent poor mental health (30 days)",
+  unmet_mh_help = "Unmet mental-health support (12 months)",
+  bullied_school = "Bullied at school (ever)",
+  bullied_online = "Bullied online (ever)", self_harm = "Self-harm (ever)",
+  suicide_attempt = "Suicide attempt (ever)", short_sleep = "Short sleep (<=6 h, school nights)",
+  ever_sex = "Ever had sex", skips_breakfast = "Skips breakfast (0-3 of past 7 days)",
+  food_insecure = "Food insecurity (12 months)", low_phys_activity = "Low physical activity (past 7 days)",
+  hiv_unaware = "Never heard of HIV/AIDS (ever)", hiv_stigma = "HIV-related stigma",
+  contra_barrier = "Contraception access barrier")
+ind_construct <- c(
+  low_self_esteem = "Mental health/self-perception", low_caregiver_supp = "Knowledge/access/support need",
+  witnessed_violence = "Experience/exposure", unfair_treatment = "Experience/exposure",
+  unsafe_streets = "Experience/exposure", drugs_nearby = "Experience/exposure",
+  witnessed_ipv = "Experience/exposure", victim_blame = "Attitude",
+  alcohol_30d = "Behavior", home_alcohol = "Experience/exposure",
+  tobacco_30d = "Behavior", marijuana_30d = "Behavior", vaped_ever = "Behavior",
+  poor_mh = "Mental health/self-perception", unmet_mh_help = "Knowledge/access/support need",
+  bullied_school = "Experience/exposure", bullied_online = "Experience/exposure",
+  self_harm = "Mental health/self-perception", suicide_attempt = "Mental health/self-perception",
+  short_sleep = "Behavior", ever_sex = "Behavior", skips_breakfast = "Behavior",
+  food_insecure = "Experience/exposure", low_phys_activity = "Behavior",
+  hiv_unaware = "Knowledge/access/support need", hiv_stigma = "Knowledge/access/support need",
+  contra_barrier = "Knowledge/access/support need")
+```
+
+**Step 2. Table 1 -- sample characteristics and the 27 indicators**
+
+```{r table1}
+cat_row <- function(x, codes, labels) {
+  v <- NA99(x); v <- v[!is.na(v)]
+  tibble(Level = labels, n = sapply(codes, function(k) sum(v %in% k))) %>%
+    mutate(pct = round(100 * n / length(v), 1))
+}
+panelA <- bind_rows(
+  cat_row(d1$sex, list(1, 2), c("Female", "Male")) %>% mutate(Characteristic = "Sex"),
+  cat_row(d1$age, list(1:2, 3:4, 5:6), c("13 or younger", "14-15", "16 or older")) %>% mutate(Characteristic = "Age group"),
+  cat_row(d1$form, list(1, 2, 3), c("1st Form", "2nd Form", "3rd Form")) %>% mutate(Characteristic = "Form"),
+  cat_row(d1$race, list(2, 4, c(1, 5), c(3, 6, 7), 8),
+          c("Maya", "Mestizo/Latino", "Creole or Garifuna", "East Indian, Mennonite, or Other", "Multiple")) %>%
+    mutate(Characteristic = "Ethnicity (collapsed)"),
+  cat_row(d1$sexid, list(1, 2:5, 6),
+          c("Heterosexual", "Sexual minority or questioning", "Did not understand the question")) %>%
+    mutate(n = NA_integer_, Characteristic = "Sexual identity (collapsed)")) %>%
+  select(Characteristic, Level, n, pct)
+# Each characteristic appears once, on its first row (Plan_v5 decision 3).
+panelA_disp <- panelA %>%
+  group_by(Characteristic) %>%
+  mutate(Characteristic = if_else(row_number() == 1, Characteristic, "")) %>% ungroup() %>%
+  mutate(n = if_else(is.na(n), "--", format(n, trim = TRUE)),
+         pct = format(pct, nsmall = 1, trim = TRUE))
+ft_1a <- flex_pub(panelA_disp,
+  col_labels = list(Characteristic = "Characteristic", Level = "Level", n = "n", pct = "%"),
+  note = paste0("Note: analytic N = ", N_analytic, "; valid-response denominators; ",
+                "sexual-identity counts suppressed in descriptive tables to protect privacy ",
+                "(group sizes reported only where an analysis requires denominators)."),
+  num_cols = c("n", "pct")) %>% bold(j = "Characteristic", part = "body")
+save_tab(ft_1a, "table1a_characteristics")
+ft_1a
+
+prof <- tibble(
+  indicator = names(R),
+  label = ind_labels[names(R)],
+  construct = ind_construct[names(R)],
+  valid_n = sapply(R, function(x) sum(!is.na(x))),
+  risk_n  = sapply(R, function(x) sum(x == 1, na.rm = TRUE)),
+  prev_pct = round(100 * sapply(R, function(x) mean(x == 1, na.rm = TRUE)), 1),
+  miss_n = sapply(R, function(x) sum(is.na(x)))) %>%
+  mutate(construct = factor(construct, levels = names(pal_construct))) %>%
+  arrange(construct, desc(prev_pct))
+prof_disp <- prof %>%
+  group_by(construct) %>%
+  mutate(construct_lab = if_else(row_number() == 1, as.character(construct), "")) %>% ungroup() %>%
+  transmute(construct_lab, label, risk_n, valid_n,
+            prev_pct = format(prev_pct, nsmall = 1, trim = TRUE), miss_n)
+ft_1b <- flex_pub(prof_disp,
+  col_labels = list(construct_lab = "Construct class", label = "Indicator", risk_n = "n at risk/need",
+                    valid_n = "Valid n", prev_pct = "Prevalence %", miss_n = "Missing n"),
+  note = "Note: 27 indicators selected from the full survey inventory by program-blind criteria (anchorable construct, prevalence at least 10%, missingness at most 10%, non-redundant); valid-response denominators; missing = survey code 99. Time windows are shown with each retrospective item; items without a window ask about the student's current situation.",
+  num_cols = c("risk_n", "valid_n", "prev_pct", "miss_n")) %>%
+  bold(j = "construct_lab", part = "body")
+save_tab(ft_1b, "table1b_indicators")
+ft_1b
+write.csv(panelA, file.path(out_dir, "table1_panelA_characteristics.csv"), row.names = FALSE)
+write.csv(prof %>% mutate(construct = as.character(construct)),
+          file.path(out_dir, "table1_panelB_indicators.csv"), row.names = FALSE)
+
+chk2 <- tibble(
+  check = c("27 indicators built", "all prevalences at least 10%", "all missingness at most 10%",
+            "every indicator has both 0 and 1"),
+  pass = c(ncol(R) == 27, all(prof$prev_pct >= 10),
+           all(prof$miss_n / N_analytic <= 0.10),
+           all(sapply(R, function(x) all(c(0, 1) %in% x[!is.na(x)])))))
+kable(chk2, caption = "Verification check 2. Selection filters hold on the built set. Every row must read TRUE.")
+stopifnot(all(chk2$pass))
+```
+
+**Step 3. Cumulative burden and clustering test (Figure 1)**
+
+```{r burden}
+cc <- R[complete.cases(R), ]
+burden <- rowSums(cc)
+burden_stats <- c(N_complete = nrow(cc), pct_of_497 = round(100 * nrow(cc) / N_analytic, 1),
+                  mean = round(mean(burden), 2), median = median(burden),
+                  sd = round(sd(burden), 2), min = min(burden), max = max(burden),
+                  any_pct = round(100 * mean(burden >= 1), 1),
+                  ge12_pct = round(100 * mean(burden >= 12), 1),
+                  ge14_pct = round(100 * mean(burden >= 14), 1))
+kable(tibble(statistic = names(burden_stats), value = unname(burden_stats)),
+      caption = "Cumulative risk/need burden among complete cases (0-27 scale).")
+set.seed(2025)
+p_marg <- colMeans(cc)
+sim <- replicate(2000, rowSums(sapply(p_marg, function(pi) rbinom(nrow(cc), 1, pi))))
+indep <- tibble(
+  statistic = c("Mean burden", "SD of burden", "P(>=12) %", "P(>=14) %"),
+  observed = c(round(mean(burden), 2), round(sd(burden), 2),
+               round(100 * mean(burden >= 12), 1), round(100 * mean(burden >= 14), 1)),
+  expected_if_independent = c(round(mean(sim), 2), round(sd(as.vector(sim)), 2),
+               round(100 * mean(sim >= 12), 1), round(100 * mean(sim >= 14), 1)))
+kable(indep, caption = "Observed burden vs the same-marginals independence null (2,000 simulations, seed 2025).")
+write.csv(indep, file.path(out_dir, "burden_vs_independence.csv"), row.names = FALSE)
+write.csv(tibble(statistic = names(burden_stats), value = unname(burden_stats)),
+          file.path(out_dir, "burden_summary.csv"), row.names = FALSE)
+chk3 <- tibble(
+  check = c("observed SD exceeds independence SD", "observed P(>=12) exceeds expected"),
+  pass = c(sd(burden) > sd(as.vector(sim)), mean(burden >= 12) > mean(sim >= 12)))
+kable(chk3, caption = "Verification check 3. Clustering signature. Every row must read TRUE.")
+stopifnot(all(chk3$pass))
+```
+
+```{r fig1-burden, fig.height=4.2}
+obs_dist <- tibble(k = 0:27) %>%
+  mutate(observed = sapply(k, function(b) mean(burden == b)) * 100,
+         expected = sapply(k, function(b) mean(sim == b)) * 100)
+fig1 <- ggplot(obs_dist, aes(x = k)) +
+  geom_col(aes(y = observed, fill = "Observed"), width = 0.78, color = "white", linewidth = 0.3) +
+  geom_line(aes(y = expected, color = "Expected if risks/needs were independent"),
+            linewidth = 0.6, linetype = "22") +
+  geom_point(aes(y = expected, color = "Expected if risks/needs were independent"),
+             size = 1.8, shape = 21, fill = "white", stroke = 0.7) +
+  scale_fill_manual(NULL, values = c("Observed" = col_observed)) +
+  scale_color_manual(NULL, values = c("Expected if risks/needs were independent" = col_null)) +
+  scale_x_continuous(breaks = seq(0, 27, 3), expand = expansion(add = c(0.4, 0.4))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(x = "Number of co-occurring risks and needs (of 27)", y = "Students (%)") +
+  theme_pub(grid_y = TRUE) +
+  theme(legend.position = c(0.97, 0.95), legend.justification = c(1, 1),
+        legend.background = element_rect(fill = "white", color = NA))
+fig1
+save_fig(fig1, "figure1_burden", h = 4.2)
+```
+
+**Step 4. Latent classes, count decided by the data (Figure 2)**
+
+```{r lca-enumeration}
+L <- as.data.frame(lapply(R, function(x) x + 1))
+f <- as.formula(paste("cbind(", paste(names(L), collapse = ","), ") ~ 1"))
+entropy <- function(m) { post <- m$posterior; K <- ncol(post)
+  1 - (-sum(post * log(post + 1e-12), na.rm = TRUE)) / (nrow(post) * log(K)) }
+gate <- data.frame(); lca_fits <- list()
+for (K in 2:6) {
+  set.seed(7)
+  m <- poLCA(f, L, nclass = K, nrep = 15, maxiter = 5000, verbose = FALSE, na.rm = FALSE)
+  lca_fits[[as.character(K)]] <- m
+  sizes <- as.integer(table(factor(m$predclass, levels = 1:K)))
+  gate <- rbind(gate, data.frame(K = K, BIC = round(m$bic, 1), AIC = round(m$aic, 1),
+                                 entropy = round(entropy(m), 3),
+                                 smallest_class = min(sizes),
+                                 class_sizes = paste(sizes, collapse = "/")))
+}
+ft_s1 <- flex_pub(gate,
+  col_labels = list(K = "Classes (K)", BIC = "BIC", AIC = "AIC", entropy = "Entropy",
+                    smallest_class = "Smallest class (n)", class_sizes = "Class sizes"),
+  note = "Note: estimated on all 497 students (full-information handling of item missingness); fixed seeds; selection rule = the BIC-minimal solution among those whose smallest modal class holds at least 25 students.",
+  num_cols = c("K", "BIC", "AIC", "entropy", "smallest_class"))
+save_tab(ft_s1, "tableS1_lca_enumeration")
+ft_s1
+write.csv(gate, file.path(out_dir, "lca_enumeration.csv"), row.names = FALSE)
+eligible <- gate$K[gate$smallest_class >= 25]
+K_sel <- eligible[which.min(gate$BIC[gate$K %in% eligible])]
+chk4 <- tibble(check = c("at least one K meets the 25-student floor", "selected K recorded"),
+               pass = c(length(eligible) > 0, K_sel %in% 2:6))
+kable(chk4, caption = paste0("Verification check 4. Enumeration rule applied; selected K = ", K_sel, "."))
+stopifnot(all(chk4$pass))
+```
+
+```{r lca-final}
+set.seed(7)
+mK <- poLCA(f, L, nclass = K_sel, nrep = 25, maxiter = 8000, verbose = FALSE, na.rm = FALSE)
+Ppres <- sapply(mK$probs, function(x) x[, 2])
+ord <- order(rowMeans(Ppres))
+sizesK <- as.integer(table(factor(mK$predclass, levels = 1:K_sel)))[ord]
+class_summary <- tibble(
+  class = paste0("C", seq_len(K_sel)),
+  share_pct = round(100 * mK$P[ord], 1),
+  modal_n = sizesK,
+  expected_burden = round(rowSums(Ppres)[ord], 1))
+ft_s1b <- flex_pub(class_summary,
+  col_labels = list(class = "Class (low to high burden)", share_pct = "Share (%)",
+                    modal_n = "Modal n", expected_burden = "Expected risks/needs (of 27)"),
+  note = "Note: model-based shares; modal n over all 497 students; expected burden sums each class's 27 conditional probabilities. Human-readable class names are assigned in the manuscript from the Figure 2 profiles.",
+  num_cols = c("share_pct", "modal_n", "expected_burden"))
+save_tab(ft_s1b, "tableS1b_class_summary")
+ft_s1b
+profiles <- t(Ppres[ord, , drop = FALSE]); colnames(profiles) <- class_summary$class
+write.csv(round(profiles * 100, 1), file.path(out_dir, "lca_profiles.csv"))
+write.csv(class_summary, file.path(out_dir, "lca_class_summary.csv"), row.names = FALSE)
+```
+
+```{r fig2-lca, fig.height=6.6, fig.width=6.9}
+ind_order <- prof$indicator
+prof_long <- as_tibble(profiles, rownames = "indicator") %>%
+  pivot_longer(-indicator, names_to = "class", values_to = "p") %>%
+  left_join(prof %>% select(indicator, overall = prev_pct), by = "indicator") %>%
+  mutate(p = 100 * p,
+         construct = factor(ind_construct[indicator], levels = names(pal_construct)),
+         label = factor(ind_labels[indicator], levels = rev(ind_labels[ind_order])),
+         class = factor(class, levels = class_summary$class))
+facet_lab <- setNames(paste0(class_summary$class, "\n(", class_summary$share_pct, "% of students)"),
+                      class_summary$class)
+fig2 <- ggplot(prof_long, aes(x = p, y = label)) +
+  geom_col(aes(fill = construct), width = 0.72) +
+  geom_segment(aes(x = overall, xend = overall,
+                   y = as.numeric(label) - 0.45, yend = as.numeric(label) + 0.45),
+               color = "black", linewidth = 0.5) +
+  facet_wrap(~class, nrow = 1, labeller = labeller(class = facet_lab)) +
+  scale_fill_manual(values = pal_construct, breaks = names(pal_construct)) +
+  scale_x_continuous(limits = c(0, 100), breaks = c(0, 50, 100),
+                     expand = expansion(mult = c(0, 0.03))) +
+  labs(x = "Probability of risk/need, given class membership (%)", y = NULL) +
+  guides(fill = guide_legend(nrow = 2)) +
+  theme_pub() +
+  theme(axis.text.y = element_text(size = 6.6),
+        strip.text = element_text(size = 8, lineheight = 1),
+        panel.spacing.x = grid::unit(8, "pt"),
+        legend.key.size = grid::unit(9, "pt"))
+fig2
+save_fig(fig2, "figure2_lca_profiles", w = 6.9, h = 6.6)
+```
+
+```{r lca-local-dependence}
+Pp <- sapply(mK$probs, function(x) x[, 2])
+model_pair <- function(i, j) sum(mK$P * Pp[, i] * Pp[, j])
+pairs_idx <- t(combn(ncol(R), 2))
+resid_tab <- tibble(
+  ind1 = ind_labels[names(R)[pairs_idx[, 1]]],
+  ind2 = ind_labels[names(R)[pairs_idx[, 2]]],
+  n_pair = apply(pairs_idx, 1, function(ij) sum(!is.na(R[[ij[1]]]) & !is.na(R[[ij[2]]]))),
+  observed = apply(pairs_idx, 1, function(ij) mean(R[[ij[1]]] == 1 & R[[ij[2]]] == 1, na.rm = TRUE)),
+  implied  = apply(pairs_idx, 1, function(ij) model_pair(ij[1], ij[2]))) %>%
+  mutate(std_resid = (observed - implied) / sqrt(implied * (1 - implied) / n_pair)) %>%
+  arrange(desc(abs(std_resid)))
+ft_s3 <- flex_pub(head(resid_tab, 10) %>%
+                    mutate(across(c(observed, implied, std_resid), ~format(round(.x, 3), nsmall = 3))),
+  col_labels = list(ind1 = "Indicator 1", ind2 = "Indicator 2", n_pair = "Pairwise n",
+                    observed = "Observed P(both)", implied = "Model-implied P(both)",
+                    std_resid = "Std. residual"),
+  note = paste0("Note: ten largest of the ", nrow(resid_tab), " pairs by absolute standardized residual (pairwise-complete bases); full table in lca_bivariate_residuals.csv."),
+  num_cols = c("n_pair", "observed", "implied", "std_resid"))
+save_tab(ft_s3, "tableS3_bivariate_residuals")
+ft_s3
+write.csv(resid_tab, file.path(out_dir, "lca_bivariate_residuals.csv"), row.names = FALSE)
+```
+
+```{r lca-sensitivity}
+for (Kalt in intersect(c(K_sel - 1, K_sel + 1), 2:6)) {
+  mA <- lca_fits[[as.character(Kalt)]]
+  PA <- sapply(mA$probs, function(x) x[, 2]); ordA <- order(rowMeans(PA))
+  profA <- round(t(PA[ordA, , drop = FALSE]) * 100)
+  colnames(profA) <- paste0("S", seq_len(Kalt), " (n=",
+                            as.integer(table(factor(mA$predclass, levels = 1:Kalt)))[ordA], ")")
+  write.csv(profA, file.path(out_dir, paste0("lca_profiles_", Kalt, "class_sensitivity.csv")))
+}
+kable(tibble(written = paste0("sensitivity profiles for K = ",
+      paste(intersect(c(K_sel - 1, K_sel + 1), 2:6), collapse = " and "))),
+      caption = "Sensitivity solutions exported (supplementary CSVs).")
+```
+
+```{r lca-covariates}
+modal <- factor(paste0("C", match(mK$predclass, ord)), levels = class_summary$class)
+cov_df <- tibble(
+  class = modal,
+  Sex = c("Female", "Male")[NA99(d1$sex)],
+  Age = cut(NA99(d1$age), breaks = c(0, 2, 4, 6), labels = c("13 or younger", "14-15", "16 or older")),
+  Form = c("1st Form", "2nd Form", "3rd Form")[NA99(d1$form)],
+  Ethnicity = dplyr::case_when(
+    d1$race == 2 ~ "Maya", d1$race == 4 ~ "Mestizo/Latino",
+    d1$race %in% c(1, 5) ~ "Creole or Garifuna",
+    d1$race %in% c(3, 6, 7) ~ "Other", d1$race == 8 ~ "Multiple", TRUE ~ NA_character_),
+  Sexual_identity = dplyr::case_when(
+    d1$sexid == 1 ~ "Heterosexual", d1$sexid %in% 2:5 ~ "Minority/questioning",
+    d1$sexid == 6 ~ "Did not understand", TRUE ~ NA_character_))
+cov_wide <- cov_df %>%
+  pivot_longer(-class, names_to = "covariate", values_to = "level") %>%
+  filter(!is.na(level)) %>%
+  count(covariate, level, class) %>%
+  group_by(covariate, level) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>% ungroup() %>%
+  select(-n) %>% pivot_wider(names_from = class, values_from = pct, values_fill = 0)
+cov_disp <- cov_wide %>% group_by(covariate) %>%
+  mutate(covariate = if_else(row_number() == 1, gsub("_", " ", covariate), "")) %>% ungroup()
+ft_s4 <- flex_pub(cov_disp,
+  col_labels = list(covariate = "Characteristic", level = "Level"),
+  note = "Note: modal assignment over all 497 students; rows sum to 100. Global chi-squared tests appear below; simple modal-assignment comparisons typically attenuate associations, so the tests are read as approximate and conditional on the assignment, and no pattern should be read as characterizing any group.",
+  num_cols = names(cov_disp)[-(1:2)]) %>% bold(j = "covariate", part = "body")
+save_tab(ft_s4, "tableS4_class_by_covariates")
+ft_s4
+write.csv(cov_wide, file.path(out_dir, "lca_modal_class_by_covariates.csv"), row.names = FALSE)
+
+# --- Global tests of modal class x characteristic (Monte Carlo p, seeded). ---
+cov_raw <- cov_df %>% pivot_longer(-class, names_to = "covariate", values_to = "level") %>%
+  filter(!is.na(level))
+cramers_v <- function(tab) {
+  chi <- suppressWarnings(chisq.test(tab, correct = FALSE)$statistic)
+  sqrt(as.numeric(chi) / (sum(tab) * (min(dim(tab)) - 1)))
+}
+cov_tests <- map_dfr(unique(cov_raw$covariate), function(nm) {
+  dd <- cov_raw %>% filter(covariate == nm)
+  tab <- table(dd$level, dd$class)
+  set.seed(2025)
+  mc <- suppressWarnings(chisq.test(tab, simulate.p.value = TRUE, B = 10000))
+  pl <- suppressWarnings(chisq.test(tab, correct = FALSE))
+  tibble(covariate = gsub("_", " ", nm), n = sum(tab), df = as.integer(pl$parameter),
+         X2 = round(as.numeric(pl$statistic), 2),
+         p_mc = signif(mc$p.value, 2), cramers_v = round(cramers_v(tab), 3),
+         min_expected = round(min(pl$expected), 1))
+})
+ft_s4b <- flex_pub(cov_tests %>% mutate(p_mc = format(p_mc, scientific = FALSE)),
+  col_labels = list(covariate = "Characteristic", n = "n", df = "df", X2 = "Chi-squared",
+                    p_mc = "p (Monte Carlo)", cramers_v = "Cramer's V", min_expected = "Min. expected cell"),
+  note = "Note: global tests of modal class by characteristic; Monte Carlo p-values from 10,000 seeded replicates; Cramer's V is the effect size (0.1 small, 0.3 moderate, 0.5 large); minimum expected cells all exceed 5. P-values are approximate and conditional on modal assignment; such comparisons typically attenuate associations, so large contrasts are unlikely to be artifacts, while null results remain ambiguous.",
+  num_cols = c("n", "df", "X2", "p_mc", "cramers_v", "min_expected"))
+save_tab(ft_s4b, "tableS4b_class_covariate_tests")
+ft_s4b
+write.csv(cov_tests, file.path(out_dir, "lca_class_covariate_tests.csv"), row.names = FALSE)
+
+# Standardized residuals for ethnicity (locates the driving cells).
+tabE <- with(cov_raw %>% filter(covariate == "Ethnicity"), table(level, class))
+eth_res <- round(suppressWarnings(chisq.test(tabE, correct = FALSE))$stdres, 2)
+kable(eth_res, caption = "Standardized residuals, ethnicity by class (|value| > 2 marks cells driving the association).")
+write.csv(as.data.frame.matrix(eth_res), file.path(out_dir, "ethnicity_class_stdres.csv"))
+
+chk5b <- tibble(
+  check = c("five characteristics tested", "all minimum expected cells >= 5",
+            "sex and sexual identity significant at p < 0.001"),
+  pass = c(nrow(cov_tests) == 5, all(cov_tests$min_expected >= 5),
+           all(cov_tests$p_mc[cov_tests$covariate %in% c("Sex", "Sexual identity")] < 0.001)))
+kable(chk5b, caption = "Verification check 5b. Class-covariate tests. Every row must read TRUE.")
+stopifnot(all(chk5b$pass))
+```
+
+**Step 5. Network on the complete-case matrix, gated by its own stability (Figure 3)**
+
+```{r network-fit, cache=TRUE}
+net <- estimateNetwork(cc, default = "IsingFit", tuning = 0.25)
+set.seed(2025)
+bC <- bootnet(net, nBoots = 500, type = "case",
+              statistics = c("strength", "expectedInfluence"), verbose = FALSE)
+cs <- corStability(bC, verbose = FALSE)
+set.seed(2025)
+bE <- bootnet(net, nBoots = 500, verbose = FALSE)
+```
+
+```{r network-gate}
+net_ok <- as.numeric(cs["expectedInfluence"]) >= 0.25
+kable(tibble(statistic = names(cs), CS_coefficient = round(as.numeric(cs), 2),
+             gate_expected_influence = ifelse(net_ok, "PASS (at least 0.25)", "FAIL -> supplement")),
+      caption = paste0("Verification check 5 (non-fatal gate). Complete-case n = ", nrow(cc), "."))
+g <- net$graph
+ut <- which(upper.tri(g) & g != 0, arr.ind = TRUE)
+edges <- tibble(from = colnames(g)[ut[, 1]], to = colnames(g)[ut[, 2]],
+                weight = round(g[ut], 2),
+                cross_construct = ind_construct[colnames(g)[ut[, 1]]] != ind_construct[colnames(g)[ut[, 2]]]) %>%
+  arrange(desc(abs(weight)))
+kable(head(edges %>% mutate(from = ind_labels[from], to = ind_labels[to]), 12),
+      caption = "Twelve strongest conditional associations (regularized edge weights).")
+bridge_tab <- edges %>% filter(cross_construct) %>%
+  pivot_longer(c(from, to), values_to = "node") %>%
+  group_by(node) %>%
+  summarise(cross_weight = round(sum(abs(weight)), 2), n_cross = n(), .groups = "drop") %>%
+  arrange(desc(cross_weight)) %>% mutate(node = ind_labels[node])
+kable(head(bridge_tab, 6), caption = "Bridge candidates: summed absolute cross-construct edge weight per node.")
+write.csv(edges, file.path(out_dir, "network_edges.csv"), row.names = FALSE)
+write.csv(bridge_tab, file.path(out_dir, "network_bridges.csv"), row.names = FALSE)
+write.csv(tibble(statistic = names(cs), cs = as.numeric(cs), complete_case_n = nrow(cc), gate_pass = net_ok),
+          file.path(out_dir, "network_stability.csv"), row.names = FALSE)
+```
+
+```{r fig3-network, fig.width=6.9, fig.height=5.6, dpi=300}
+node_lab <- c(low_self_esteem = "Low\nself-\nesteem", low_caregiver_supp = "Low\ncaregiver\nsupport",
+              witnessed_violence = "Witnessed\nviolence", unfair_treatment = "Unfair\ntreatment",
+              unsafe_streets = "Unsafe\nstreets", drugs_nearby = "Drugs\nnearby",
+              witnessed_ipv = "Inter-\nparental\nviolence", victim_blame = "Victim-\nblaming",
+              alcohol_30d = "Alcohol\nuse", home_alcohol = "Home\nalcohol",
+              tobacco_30d = "Tobacco", marijuana_30d = "Marijuana", vaped_ever = "Vaping",
+              poor_mh = "Poor\nmental\nhealth", unmet_mh_help = "Unmet\nsupport",
+              bullied_school = "School\nbullying", bullied_online = "Online\nbullying",
+              self_harm = "Self-\nharm", suicide_attempt = "Suicide\nattempt",
+              short_sleep = "Short\nsleep", ever_sex = "Sexual\nactivity",
+              skips_breakfast = "Skips\nbreakfast", food_insecure = "Food\ninsecurity",
+              low_phys_activity = "Low\nphysical\nactivity", hiv_unaware = "HIV\nunaware",
+              hiv_stigma = "HIV\nstigma", contra_barrier = "Contra-\nception\nbarrier")
+node_groups <- factor(ind_construct[colnames(g)], levels = names(pal_construct))
+set.seed(2025)
+net_layout <- qgraph(g, layout = "spring", DoNotPlot = TRUE)$layout
+draw_net <- function() {
+  qgraph(g, layout = net_layout, labels = node_lab[colnames(g)],
+         groups = node_groups, color = pal_construct[levels(node_groups)],
+         vsize = 7.6, label.cex = 0.85, label.scale.equal = TRUE, label.color = "black",
+         border.width = 1.4, border.color = "gray25",
+         posCol = "#5B6770", negCol = "#D55E00", negDashed = TRUE,
+         fade = TRUE, esize = 9,
+         legend = TRUE, legend.cex = 0.34, GLratio = 2.6)
+}
+draw_net()
+ragg::agg_png(file.path(out_dir, "figure3_network.png"), width = 6.9, height = 5.6,
+              units = "in", res = 600)
+draw_net(); dev.off()
+tryCatch({ cairo_pdf(file.path(out_dir, "figure3_network.pdf"), width = 6.9, height = 5.6)
+           draw_net(); dev.off() }, error = function(e) invisible(NULL))
+```
+
+```{r network-boots, fig.height=6.2}
+short_lab <- gsub("\n", " ", node_lab); short_lab <- gsub("- ", "-", short_lab)
+samp_e <- bE$sampleTable %>% filter(type == "edge") %>% select(id, node1, node2, sample = value)
+boot_e <- bE$bootTable %>% filter(type == "edge") %>%
+  group_by(id) %>% summarise(lo = quantile(value, 0.025), hi = quantile(value, 0.975), .groups = "drop")
+edge_ci <- left_join(samp_e, boot_e, by = "id") %>%
+  arrange(sample) %>%
+  mutate(rank = row_number(), lab = paste(short_lab[node1], "-", short_lab[node2]),
+         top = rank(-abs(sample)) <= 5)
+figS1 <- ggplot(edge_ci, aes(x = sample, y = rank)) +
+  geom_vline(xintercept = 0, linetype = "22", color = "gray55", linewidth = 0.4) +
+  geom_segment(aes(x = lo, xend = hi, yend = rank), color = "gray70", linewidth = 0.35) +
+  geom_point(size = 1.0, color = "black") +
+  geom_point(data = subset(edge_ci, top), size = 1.5, color = col_observed) +
+  ggrepel::geom_text_repel(data = subset(edge_ci, top), aes(x = hi, label = lab),
+                           nudge_x = 0.25, direction = "y", hjust = 0, size = 2.4,
+                           family = fig_family, color = "black",
+                           segment.color = "gray60", segment.size = 0.25,
+                           min.segment.length = 0, box.padding = 0.12) +
+  scale_x_continuous(limits = c(min(edge_ci$lo) - 0.05, max(edge_ci$hi) + 1.6)) +
+  labs(x = "Edge weight (regularized conditional association)",
+       y = paste0("All ", nrow(edge_ci), " possible edges, ordered by estimated weight")) +
+  theme_pub() +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        axis.line.y = element_blank())
+figS1
+save_fig(figS1, "figureS1_edge_bootstrap", h = 6.2)
+```
+
+```{r network-casedrop, fig.height=4.0}
+figS2 <- plot(bC, statistics = c("strength", "expectedInfluence")) +
+  scale_color_manual(values = c("#0072B2", "#D55E00"), labels = c("Expected influence", "Strength")) +
+  scale_fill_manual(values = c("#0072B2", "#D55E00"), labels = c("Expected influence", "Strength")) +
+  labs(x = "Share of the sample retained after case dropping",
+       y = "Correlation with original centrality") +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_pub(grid_y = TRUE)
+figS2
+save_fig(figS2, "figureS2_casedrop_stability", h = 4.0)
+```
+
+**Step 6. Priority and support cascade (Figure 4; Plan_v5 decision 10)**
+
+```{r cascade}
+# ============================================================================
+# PRIORITY AND SUPPORT CASCADE. Adapts the intersectional priority cascade
+# (Morales, Belize MICS5 manuscript) and the co-occurrence cascade of
+# De La Rosa et al. (2024), both descending from the HIV care continuum
+# (Gardner et al., 2011; Hargreaves et al., 2016). Outcome: the life-safety
+# indicator (lifetime suicide attempt). Levels use the study's two largest
+# descriptive contrasts (sex; sexual identity); a support-gap level follows
+# the care-continuum logic. All denominators are valid-response counts.
+# ============================================================================
+att  <- R$suicide_attempt
+fem  <- NA99(d1$sex) == 1
+minq <- NA99(d1$sexid) %in% 2:5
+lvl <- function(name, keep) {
+  a <- att[(keep %in% TRUE) & !is.na(att)]
+  tibble(level = name, n = length(a), pct = round(100 * mean(a), 1))
+}
+casc <- bind_rows(
+  lvl("All students", rep(TRUE, nrow(d1))),
+  lvl("Girls", fem),
+  lvl("Sexual-minority or questioning students", minq),
+  lvl("Girls with a sexual-minority or questioning identity", fem & minq))
+# Support-gap levels (any mental-health marker -> unmet support among them).
+pmh <- R$poor_mh; sh <- R$self_harm; unmet <- R$unmet_mh_help
+marker <- (pmh %in% 1) | (sh %in% 1) | (att %in% 1)
+supp <- tibble(
+  level = c("Students with any mental-health marker",
+            "Of those, rarely or never got needed help",
+            "Among students who attempted suicide, rarely or never got needed help"),
+  n = c(sum(marker, na.rm = TRUE),
+        sum(unmet[marker & !is.na(unmet)] == 1),
+        sum(unmet[(att %in% 1) & !is.na(unmet)] == 1)),
+  pct = c(round(100 * mean(marker, na.rm = TRUE), 1),
+          round(100 * mean(unmet[marker & !is.na(unmet)] == 1), 1),
+          round(100 * mean(unmet[(att %in% 1) & !is.na(unmet)] == 1), 1)))
+cascade_all <- bind_rows(casc %>% mutate(panel = "Concentration"),
+                         supp %>% mutate(panel = "Support gap"))
+ft_s7 <- flex_pub(cascade_all %>% mutate(pct = format(pct, nsmall = 1, trim = TRUE)),
+  col_labels = list(level = "Cascade level", n = "n", pct = "%", panel = "Panel"),
+  note = "Note: concentration levels give the percentage of each group who ever attempted suicide (valid responses); support-gap levels give the share carrying any mental-health marker (frequent poor mental health, self-harm, or suicide attempt) and, of those, the share reporting they rarely or never got needed help in the past 12 months.",
+  num_cols = c("n", "pct"))
+save_tab(ft_s7, "tableS7_cascade")
+ft_s7
+write.csv(cascade_all, file.path(out_dir, "cascade_priority_support.csv"), row.names = FALSE)
+
+chk6 <- tibble(check = c("all concentration cells hold at least 25 students",
+                         "baseline matches the suicide-attempt prevalence (26.6)"),
+               pass = c(min(casc$n) >= 25, abs(casc$pct[1] - 26.6) < 0.06))
+kable(chk6, caption = "Verification check 6. Cascade integrity. Every row must read TRUE.")
+stopifnot(all(chk6$pass))
+```
+
+```{r fig4-cascade, fig.height=4.4, fig.width=6.9}
+# Bars retained per the graphical-perception evidence (position/length are the
+# most accurately decoded encodings; Cleveland and McGill, 1984) and the
+# care-cascade convention. One-hue sequential fill encodes prevalence
+# intensity, NOT group identity (Plan_v5 decision 18); a dashed reference line
+# and an annotation carry the concentration message.
+ratio_txt <- paste0(format(round(casc$pct[4] / casc$pct[1], 1), nsmall = 1),
+                    " times the school-wide figure")
+casc_plot <- casc %>%
+  mutate(lab = paste0(gsub(" or ", " or\n", gsub(" with a ", "\nwith a ", level)),
+                      "\n(n = ", n, ")"),
+         lab = factor(lab, levels = lab),
+         val_lab = ifelse(row_number() == 1,
+                          paste0(format(pct, nsmall = 1), "% (school-wide)"),
+                          paste0(format(pct, nsmall = 1), "%")))
+fig4 <- ggplot(casc_plot, aes(x = lab, y = pct, fill = lab)) +
+  geom_col(width = 0.62, color = "white", linewidth = 0.4) +
+  geom_hline(yintercept = casc$pct[1], linetype = "22", color = col_null, linewidth = 0.45) +
+  geom_text(aes(label = val_lab), vjust = -0.55,
+            size = 3.1, fontface = "bold", family = fig_family, color = "black") +
+  annotate("text", x = 4, y = casc$pct[4] + 6.4, size = 2.9, fontface = "italic",
+           family = fig_family, color = "black", label = ratio_txt) +
+  scale_fill_manual(values = setNames(pal_cascade, levels(casc_plot$lab)), guide = "none") +
+  scale_y_continuous(limits = c(0, 74), expand = expansion(mult = c(0, 0.02))) +
+  labs(x = NULL, y = "Students who ever attempted suicide (%)") +
+  theme_pub(grid_y = TRUE) +
+  theme(axis.text.x = element_text(size = 7.6, lineheight = 1))
+fig4
+save_fig(fig4, "figure4_cascade", w = 6.9, h = 4.4)
+```
+
+**Step 7. List experiments (analysis retained; exported as supplementary material)**
+
+```{r listexp}
+le_clean <- function(x) ifelse(x %in% 0:4, x, NA_real_)
+arm_of <- list(DV = c(1, 3), SU = c(2, 3), SA = c(1, 4))
+le_est <- function(col, block) {
+  y <- le_clean(d1[[col]]); tr <- d1$treatment %in% arm_of[[block]]
+  t <- y[tr & !is.na(y)]; c <- y[!tr & !is.na(y)]
+  diff <- mean(t) - mean(c)
+  se <- sqrt(var(t)/length(t) + var(c)/length(c))
+  df <- (var(t)/length(t) + var(c)/length(c))^2 /
+        ((var(t)/length(t))^2/(length(t)-1) + (var(c)/length(c))^2/(length(c)-1))
+  tibble(est = 100*diff, lo = 100*(diff - qt(.975, df)*se), hi = 100*(diff + qt(.975, df)*se),
+         n_T = length(t), n_C = length(c))
+}
+LE <- bind_rows(
+  le_est("ledv1", "DV") %>% mutate(block = "Dating violence", topic = "Physical dating violence"),
+  le_est("ledv2", "DV") %>% mutate(block = "Dating violence", topic = "Sexual dating violence"),
+  le_est("ledv3", "DV") %>% mutate(block = "Dating violence", topic = "Sexual harassment"),
+  le_est("lesu1", "SU") %>% mutate(block = "Substance use", topic = "Alcohol"),
+  le_est("lesu2", "SU") %>% mutate(block = "Substance use", topic = "Tobacco"),
+  le_est("lesu3", "SU") %>% mutate(block = "Substance use", topic = "Marijuana"),
+  le_est("lesa1", "SA") %>% mutate(block = "Sexual activity", topic = "Ever had sex"),
+  le_est("lesa2", "SA") %>% mutate(block = "Sexual activity", topic = "No condom at last sex"),
+  le_est("lesa3", "SA") %>% mutate(block = "Sexual activity", topic = ">1 lifetime partner"))
+direct_pct <- function(x, codes, valid) round(100 * sum(x %in% codes) / sum(x %in% valid), 1)
+direct_bench <- tibble(topic = c("Alcohol", "Tobacco", "Marijuana", "Ever had sex"),
+                       direct = c(direct_pct(d1$drinking, 3:7, 1:7), direct_pct(d1$nicotine, 2:6, 1:6),
+                                  direct_pct(d1$marijuana, 2:6, 1:6), direct_pct(d1$sexage, 2:7, 1:7)))
+LEtab <- LE %>% left_join(direct_bench, by = "topic") %>%
+  mutate(across(c(est, lo, hi), ~round(.x, 1)))
+tab_s6 <- LEtab %>%
+  mutate(ci = paste0(format(lo, nsmall = 1, trim = TRUE), " to ", format(hi, nsmall = 1, trim = TRUE)),
+         est = format(est, nsmall = 1, trim = TRUE),
+         direct = ifelse(is.na(direct), "--", format(direct, nsmall = 1, trim = TRUE))) %>%
+  select(block, topic, est, ci, n_T, n_C, direct) %>%
+  group_by(block) %>% mutate(block = if_else(row_number() == 1, block, "")) %>% ungroup()
+ft_s6 <- flex_pub(tab_s6,
+  col_labels = list(block = "Block", topic = "Sensitive item", est = "List estimate (%)",
+                    ci = "95% CI", n_T = "n treatment", n_C = "n control", direct = "Direct question (%)"),
+  note = "Note: difference in mean item counts (treatment minus control), corrected crossed arms; Welch 95% CI; -- = no direct counterpart. List items use a 12-month frame; direct substance items use 30 days.",
+  num_cols = c("est", "ci", "n_T", "n_C", "direct")) %>% bold(j = "block", part = "body")
+save_tab(ft_s6, "tableS6_list_experiments")
+ft_s6
+write.csv(LEtab, file.path(out_dir, "list_experiment_estimates.csv"), row.names = FALSE)
+chk7 <- tibble(check = c("nine items estimated", "minimum arm at least 200"),
+               pass = c(nrow(LE) == 9, min(LE$n_T, LE$n_C) >= 200))
+kable(chk7, caption = "Verification check 7. List-experiment integrity. Every row must read TRUE.")
+stopifnot(all(chk7$pass))
+```
+
+```{r figS3-listexp, fig.height=4.6, fig.width=6.9}
+LEplot <- LEtab %>%
+  mutate(topic = factor(topic, levels = rev(LEtab$topic)),
+         block = factor(block, levels = c("Dating violence", "Substance use", "Sexual activity")),
+         est_txt = paste0(format(est, nsmall = 1, trim = TRUE), " [",
+                          format(lo, nsmall = 1, trim = TRUE), ", ",
+                          format(hi, nsmall = 1, trim = TRUE), "]"))
+x_col <- max(LEplot$hi) + 8
+figS3 <- ggplot(LEplot, aes(x = est, y = topic)) +
+  geom_vline(xintercept = 0, color = "gray55", linetype = "22", linewidth = 0.4) +
+  geom_segment(aes(x = lo, xend = hi, yend = topic), color = "black", linewidth = 0.5) +
+  geom_point(size = 2.3, shape = 15, color = "black") +
+  geom_point(aes(x = direct, shape = "Direct question"), size = 2.6,
+             color = col_direct, stroke = 0.9, na.rm = TRUE) +
+  geom_text(aes(x = x_col, label = est_txt), hjust = 0, size = 2.6,
+            family = fig_family, color = "black") +
+  scale_shape_manual(NULL, values = c("Direct question" = 5)) +
+  scale_x_continuous(limits = c(min(LEplot$lo) - 3, x_col + 24), breaks = seq(-20, 40, 20)) +
+  facet_grid(block ~ ., scales = "free_y", space = "free_y") +
+  labs(x = "Estimated prevalence (%)", y = NULL) +
+  theme_pub() +
+  theme(strip.text.y = element_text(angle = 0, hjust = 0),
+        legend.position = c(0.985, 0.02), legend.justification = c(1, 0),
+        legend.background = element_rect(fill = "white", color = NA))
+figS3
+save_fig(figS3, "figureS3_list_experiments", w = 6.9, h = 4.6)
+```
+
+**Step 8. Table 2 -- data-driven priority map**
+
+```{r table2}
+conc_class <- apply(profiles, 1, function(p) class_summary$class[which.max(p)])
+range_flat <- apply(profiles, 1, function(p) 100 * (max(p) - min(p)) < 10)
+bridge_nodes <- if (net_ok) head(bridge_tab$node, 3) else character(0)
+prio <- prof %>%
+  transmute(construct = as.character(construct), label,
+            prev_pct = format(prev_pct, nsmall = 1, trim = TRUE),
+            life_safety = ifelse(indicator %in% c("suicide_attempt", "self_harm"), "Yes", ""),
+            concentrates_in = ifelse(range_flat[indicator], "School-wide (similar in every class)",
+                                     conc_class[indicator]),
+            bridge = ifelse(label %in% bridge_nodes, "Yes", ""))
+prio_disp <- prio %>% group_by(construct) %>%
+  mutate(construct = if_else(row_number() == 1, construct, "")) %>% ungroup()
+ft_2 <- flex_pub(prio_disp,
+  col_labels = list(construct = "Construct class", label = "Risk / need",
+                    prev_pct = "Prevalence %", life_safety = "Life-safety flag",
+                    concentrates_in = "Concentrates in", bridge = "Network bridge"),
+  note = paste0("Note: prevalence on valid-response bases; life-safety items flagged regardless of rank; ",
+                "'concentrates in' = class with the highest conditional probability (Figure 2), with items ",
+                "whose probabilities differ by under 10 points across classes marked school-wide; ",
+                "bridge = among the three largest cross-construct connectors in the network."),
+  num_cols = "prev_pct") %>% bold(j = "construct", part = "body")
+save_tab(ft_2, "table2_priority")
+ft_2
+write.csv(prio, file.path(out_dir, "table2_priority.csv"), row.names = FALSE)
+```
+
+**Step 9. Supplement: sex-stratified prevalence; consistency; reconciliation**
+
+```{r sex-strat}
+sex_strat <- map_dfr(names(R), function(v) {
+  tibble(indicator = ind_labels[v],
+         female_pct = round(100 * mean(R[[v]][NA99(d1$sex) == 1] == 1, na.rm = TRUE), 1),
+         male_pct   = round(100 * mean(R[[v]][NA99(d1$sex) == 2] == 1, na.rm = TRUE), 1))
+})
+ft_s5 <- flex_pub(sex_strat %>% mutate(across(where(is.numeric), ~format(.x, nsmall = 1, trim = TRUE))),
+  col_labels = list(indicator = "Risk / need", female_pct = "Female (%)", male_pct = "Male (%)"),
+  note = "Note: valid-response denominators within each sex; descriptive, no tests.",
+  num_cols = c("female_pct", "male_pct"))
+save_tab(ft_s5, "tableS5_sex_stratified")
+ft_s5
+write.csv(sex_strat, file.path(out_dir, "sex_stratified_prevalence.csv"), row.names = FALSE)
+
+incons_relation <- sum(d1$relation == 1 & d1$relationqual %in% 1:5, na.rm = TRUE)
+incons_sex      <- sum(d1$sexage == 1 & d1$contraceptionlast %in% 1:6, na.rm = TRUE)
+chk8 <- tibble(check = c("relationship pair = 33", "sexual-activity pair = 44"),
+               pass = c(incons_relation == 33, incons_sex == 44))
+kable(chk8, caption = "Verification check 8. Paired-item inconsistency counts. Every row must read TRUE.")
+stopifnot(all(chk8$pass))
+```
+
+```{r reconciliation}
+rv <- function(ind) prof$prev_pct[prof$indicator == ind]
+recon <- tribble(
+  ~quantity, ~report, ~script, ~tol,
+  "Low physical activity %",            66.7, rv("low_phys_activity"), 0.06,
+  "Witnessed neighborhood violence %",  55.0, rv("witnessed_violence"), 0.06,
+  "Short sleep %",                      44.6, rv("short_sleep"), 0.06,
+  "Bullied at school %",                43.6, rv("bullied_school"), 0.06,
+  "Witnessed interparental violence %", 39.6, rv("witnessed_ipv"), 0.06,
+  "Skips breakfast %",                  36.0, rv("skips_breakfast"), 0.06,
+  "Ever vaped %",                       33.8, rv("vaped_ever"), 0.06,
+  "Self-harm %",                        32.7, rv("self_harm"), 0.06,
+  "Frequent poor mental health %",      30.1, rv("poor_mh"), 0.06,
+  "Ever had sex %",                     27.0, rv("ever_sex"), 0.06,
+  "Bullied online %",                   26.8, rv("bullied_online"), 0.06,
+  "Suicide attempt %",                  26.6, rv("suicide_attempt"), 0.06,
+  "Food insecurity %",                  26.3, rv("food_insecure"), 0.06,
+  "Any alcohol (30 d) %",               25.1, rv("alcohol_30d"), 0.06,
+  "Tobacco (30 d) %",                   14.7, rv("tobacco_30d"), 0.06,
+  "Marijuana (30 d) %",                 14.7, rv("marijuana_30d"), 0.06,
+  "Unfair treatment %",                 35.0, rv("unfair_treatment"), 0.15,
+  "Unsafe streets %",                   35.6, rv("unsafe_streets"), 0.15,
+  "Drugs nearby %",                     29.3, rv("drugs_nearby"), 0.15,
+  "Home alcohol %",                     35.6, rv("home_alcohol"), 0.06,
+  "Unmet MH support %",                 45.1, rv("unmet_mh_help"), 0.15,
+  "Victim-blaming %",                   21.1, rv("victim_blame"), 0.06,
+  "HIV unaware %",                      20.8, rv("hiv_unaware"), 0.06,
+  "HIV stigma %",                       56.2, rv("hiv_stigma"), 0.06,
+  "Contraception barrier %",            63.2, rv("contra_barrier"), 0.15,
+  "Low self-esteem %",                  20.2, rv("low_self_esteem"), 0.15,
+  "Low caregiver support %",            11.8, rv("low_caregiver_supp"), 0.15,
+  "LE: sexual harassment %",  14.4, LEtab$est[LEtab$topic == "Sexual harassment"], 0.06,
+  "LE: sexual dating violence %", 12.6, LEtab$est[LEtab$topic == "Sexual dating violence"], 0.06,
+  "LE: physical dating violence %", 5.2, LEtab$est[LEtab$topic == "Physical dating violence"], 0.06,
+  "LE: marijuana %", 15.4, LEtab$est[LEtab$topic == "Marijuana"], 0.06,
+  "LE: tobacco %",    8.9, LEtab$est[LEtab$topic == "Tobacco"], 0.06,
+  "LE: alcohol %",    5.7, LEtab$est[LEtab$topic == "Alcohol"], 0.06,
+  "LE: >1 lifetime partner %", 24.4, LEtab$est[LEtab$topic == ">1 lifetime partner"], 0.06,
+  "LE: ever had sex %", 6.2, LEtab$est[LEtab$topic == "Ever had sex"], 0.06,
+  "LE: no condom at last sex %", -3.9, LEtab$est[LEtab$topic == "No condom at last sex"], 0.06) %>%
+  mutate(match = abs(report - script) <= tol)
+kable(recon, caption = "Reconciliation vs the descriptive report. Every row should read TRUE (0.15 tolerance where the report rounded components before summing).")
+write.csv(recon, file.path(out_dir, "reconciliation_vs_report.csv"), row.names = FALSE)
+chk9 <- tibble(check = "all reconciled values match within tolerance", pass = all(recon$match))
+kable(chk9, caption = "Verification check 9. Reconciliation. Must read TRUE.")
+stopifnot(all(recon$match))
+```
+
+**Step 9b. Consent-item status and item completeness**
+
+```{r consent-missingness}
+# ============================================================================
+# Association between leaving the consent item blank (retained under the
+# approved passive-consent protocol) and missing at least one of the 27
+# indicators. Chi-squared (Yates) with Fisher confirmation and the odds ratio.
+# ============================================================================
+blank <- d1$consent == 2
+incomplete <- !complete.cases(R)
+tab_cm <- table(consent = ifelse(blank, "Blank", "Affirmed"),
+                completeness = ifelse(incomplete, "Missed >= 1 item", "All 27 answered"))
+cs_cm <- suppressWarnings(chisq.test(tab_cm, correct = TRUE))
+fi_cm <- fisher.test(tab_cm)
+a <- tab_cm["Blank", "Missed >= 1 item"]; b <- tab_cm["Blank", "All 27 answered"]
+cA <- tab_cm["Affirmed", "Missed >= 1 item"]; dA <- tab_cm["Affirmed", "All 27 answered"]
+or_cm <- (a * dA) / (b * cA)
+consent_missing <- tibble(
+  measure = c("Blank consent, missed >= 1 item (%)", "Affirmed consent, missed >= 1 item (%)",
+              "Odds ratio (Fisher 95% CI)", "Chi-squared p (Yates)", "Fisher exact p"),
+  value = c(sprintf("%.1f (%d/%d)", 100 * a / (a + b), a, a + b),
+            sprintf("%.1f (%d/%d)", 100 * cA / (cA + dA), cA, cA + dA),
+            sprintf("%.2f (%.2f to %.2f)", fi_cm$estimate, fi_cm$conf.int[1], fi_cm$conf.int[2]),
+            sprintf("%.3f", cs_cm$p.value), sprintf("%.3f", fi_cm$p.value)))
+kable(consent_missing, caption = "Consent-item status and completeness on the 27 indicators.")
+write.csv(consent_missing, file.path(out_dir, "consent_missingness.csv"), row.names = FALSE)
+chk10 <- tibble(check = c("2x2 margins sum to 497", "expected minimum >= 5"),
+                pass = c(sum(tab_cm) == N_analytic, min(cs_cm$expected) >= 5))
+kable(chk10, caption = "Verification check 10. Consent-completeness test validity. Every row must read TRUE.")
+stopifnot(all(chk10$pass))
+```
+
+**Step 9c. Sensitivity analysis -- consent-affirmed students only**
+
+```{r sensitivity-consent, cache=TRUE}
+# ============================================================================
+# SENSITIVITY ANALYSIS (Plan_v5 decision 19): every narrative-critical result
+# recomputed on students who affirmed consent (consent = 1; n = 436), with
+# identical definitions, seeds, and selection rules. The comparison values
+# come from THIS session's main objects, never from hard-coded numbers.
+# ============================================================================
+dS <- d0 %>% filter(consent == 1)
+R_s <- build_indicators(dS)
+prev_s <- sapply(R_s, function(x) round(100 * mean(x == 1, na.rm = TRUE), 1))
+cc_s <- R_s[complete.cases(R_s), ]; burden_s <- rowSums(cc_s)
+set.seed(2025)
+sim_s <- replicate(2000, rowSums(sapply(colMeans(cc_s), function(pi) rbinom(nrow(cc_s), 1, pi))))
+L_s <- as.data.frame(lapply(R_s, function(x) x + 1))
+gate_s <- data.frame(); fits_s <- list()
+for (K in 2:6) {
+  set.seed(7)
+  m <- poLCA(f, L_s, nclass = K, nrep = 15, maxiter = 5000, verbose = FALSE, na.rm = FALSE)
+  fits_s[[as.character(K)]] <- m
+  sizes <- as.integer(table(factor(m$predclass, levels = 1:K)))
+  gate_s <- rbind(gate_s, data.frame(K = K, BIC = round(m$bic, 1),
+                                     entropy = round(entropy(m), 3), smallest = min(sizes)))
+}
+elig_s <- gate_s$K[gate_s$smallest >= 25]
+K_sel_s <- elig_s[which.min(gate_s$BIC[gate_s$K %in% elig_s])]
+mS <- fits_s[[as.character(K_sel_s)]]
+Pp_s <- sapply(mS$probs, function(x) x[, 2]); ord_s <- order(rowMeans(Pp_s))
+net_s <- estimateNetwork(cc_s, default = "IsingFit", tuning = 0.25)
+set.seed(2025)
+bC_s <- bootnet(net_s, nBoots = 500, type = "case",
+                statistics = c("strength", "expectedInfluence"), verbose = FALSE)
+cs_s <- corStability(bC_s, verbose = FALSE)
+g_s <- net_s$graph
+att_s <- R_s$suicide_attempt; fem_s <- NA99(dS$sex) == 1; minq_s <- NA99(dS$sexid) %in% 2:5
+clev <- function(att, keep) { x <- att[(keep %in% TRUE) & !is.na(att)]
+  c(n = length(x), pct = round(100 * mean(x), 1)) }
+casc_s <- rbind(clev(att_s, rep(TRUE, nrow(dS))), clev(att_s, fem_s),
+                clev(att_s, minq_s), clev(att_s, fem_s & minq_s))
+le_est_s <- function(col, block) {
+  y <- le_clean(dS[[col]]); tr <- dS$treatment %in% arm_of[[block]]
+  t <- y[tr & !is.na(y)]; c <- y[!tr & !is.na(y)]
+  diff <- mean(t) - mean(c)
+  se <- sqrt(var(t)/length(t) + var(c)/length(c))
+  df <- (var(t)/length(t) + var(c)/length(c))^2 /
+        ((var(t)/length(t))^2/(length(t)-1) + (var(c)/length(c))^2/(length(c)-1))
+  c(est = 100*diff, lo = 100*(diff - qt(.975, df)*se), hi = 100*(diff + qt(.975, df)*se))
+}
+le_partner_s <- le_est_s("lesa3", "SA")
+# Movement of the eight narrative-critical edges between samples.
+key_pairs <- rbind(c("tobacco_30d","marijuana_30d"), c("self_harm","suicide_attempt"),
+                   c("alcohol_30d","vaped_ever"), c("ever_sex","contra_barrier"),
+                   c("bullied_online","suicide_attempt"), c("witnessed_violence","drugs_nearby"),
+                   c("unfair_treatment","bullied_school"), c("drugs_nearby","vaped_ever"))
+edge_moves <- abs(g_s[key_pairs] - g[key_pairs])
+access_edge_s <- g_s["ever_sex", "contra_barrier"]
+```
+
+```{r sensitivity-table}
+fmtp <- function(x, d = 1) format(round(x, d), nsmall = d, trim = TRUE)
+le_partner_m <- LEtab %>% filter(topic == ">1 lifetime partner")
+sens <- tibble(
+  metric = c("Sample n", "Largest prevalence shift across the 27 indicators (points)",
+             "Complete-case n (burden and network)", "Burden mean (of 27)",
+             "Burden SD, observed vs independence",
+             "Selected number of classes", "Entropy at selected K", "Smallest class (n)",
+             "Network stability (CS, expected influence)",
+             "Cascade: all students -> girls -> minority/questioning -> intersection (%)",
+             "List experiment, more than one lifetime partner (95% CI)"),
+  main = c(N_analytic, "--", nrow(cc), fmtp(mean(burden), 2),
+           paste(fmtp(sd(burden), 2), "vs", fmtp(sd(as.vector(sim)), 2)),
+           K_sel, gate$entropy[gate$K == K_sel], gate$smallest_class[gate$K == K_sel],
+           fmtp(as.numeric(cs["expectedInfluence"]), 2),
+           paste(casc$pct, collapse = " -> "),
+           paste0(le_partner_m$est, " (", le_partner_m$lo, " to ", le_partner_m$hi, ")")),
+  sensitivity = c(nrow(dS),
+                  fmtp(max(abs(prev_s[names(R)] - prof$prev_pct[match(names(R), prof$indicator)])), 1),
+                  nrow(cc_s), fmtp(mean(burden_s), 2),
+                  paste(fmtp(sd(burden_s), 2), "vs", fmtp(sd(as.vector(sim_s)), 2)),
+                  K_sel_s, gate_s$entropy[gate_s$K == K_sel_s], gate_s$smallest[gate_s$K == K_sel_s],
+                  fmtp(as.numeric(cs_s["expectedInfluence"]), 2),
+                  paste(casc_s[, "pct"], collapse = " -> "),
+                  paste0(fmtp(le_partner_s["est"]), " (", fmtp(le_partner_s["lo"]), " to ",
+                         fmtp(le_partner_s["hi"]), ")")))
+ft_s8 <- flex_pub(sens,
+  col_labels = list(metric = "Result", main = "Main analysis (N = 497)",
+                    sensitivity = "Consent-affirmed only (n = 436)"),
+  note = paste0("Note: identical indicator definitions, random seeds, and selection rules in both columns; ",
+                "the sensitivity column excludes the 61 students who left the consent item blank. ",
+                "The eight narrative-critical network edges moved by at most ", fmtp(max(edge_moves), 2),
+                " (sexual activity with contraception-access barrier: ",
+                fmtp(g["ever_sex", "contra_barrier"], 2), " vs ", fmtp(access_edge_s, 2), ")."),
+  num_cols = c("main", "sensitivity"))
+save_tab(ft_s8, "tableS8_sensitivity_consent")
+ft_s8
+write.csv(sens, file.path(out_dir, "sensitivity_consent_affirmed.csv"), row.names = FALSE)
+
+chk11 <- tibble(
+  check = c("sensitivity n = 436", "same class count selected", "network gate holds in sensitivity",
+            "cascade strictly increasing in sensitivity", "list estimate for >1 partner still excludes zero"),
+  pass = c(nrow(dS) == 436, K_sel_s == K_sel, as.numeric(cs_s["expectedInfluence"]) >= 0.25,
+           all(diff(casc_s[, "pct"]) > 0), le_partner_s["lo"] > 0))
+kable(chk11, caption = "Verification check 11. Sensitivity analysis. Every row must read TRUE.")
+stopifnot(all(chk11$pass))
+```
+
+**Step 10. Consolidated gates and session information**
+
+```{r final-gates}
+gate_values <- c(N_analytic, nrow(cc),
+                 paste0(round(sd(burden), 2), " vs ", round(sd(as.vector(sim)), 2)),
+                 K_sel, gate$entropy[gate$K == K_sel], gate$smallest_class[gate$K == K_sel],
+                 round(as.numeric(cs["expectedInfluence"]), 2),
+                 round(as.numeric(cs["strength"]), 2),
+                 ifelse(net_ok, "PASS", "FAIL -> supplement"),
+                 min(casc$n), min(LE$n_T, LE$n_C),
+                 paste0("K = ", K_sel_s, "; CS = ", round(as.numeric(cs_s["expectedInfluence"]), 2),
+                        "; cascade preserved"))
+gates <- tibble(
+  gate = c("Analytic N", "Complete-case n (27 items)", "Burden over-dispersion (SD obs vs indep)",
+           "LCA: selected K", "LCA: entropy at selected K", "LCA: smallest class at selected K",
+           "Network: CS expected influence", "Network: CS strength", "Network gate",
+           "Cascade: smallest concentration cell", "List experiments: minimum arm",
+           "Sensitivity (consent-affirmed, n = 436)"),
+  value = gate_values)
+kable(gates, caption = "Consolidated gates for the v6 manuscript (this run, fixed seeds).")
+write.csv(gates, file.path(out_dir, "final_gate_summary.csv"), row.names = FALSE)
+```
+
+```{r session}
+si <- sessionInfo()
+pkgs <- sapply(si$otherPkgs, function(p) p$Version)
+kable(tibble(package = names(pkgs), version = unname(pkgs)),
+      caption = paste0("Package versions (", R.version.string, ")."))
+```
+
+**Closing note.** Every display item is exported independently to tcc_analysis4_outputs/ (figures as vector PDF + 600-dpi PNG; tables as booktabs Word files with 11-point single-spaced notes, plus CSVs). The v6 manuscript may cite only values printed by this script.
