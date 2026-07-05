@@ -157,7 +157,7 @@ R <- build_indicators(d1)
 ind_labels <- c(
   low_self_esteem = "Low self-esteem", low_caregiver_supp = "Low perceived caregiver support",
   witnessed_violence = "Witnessed neighborhood violence (ever)",
-  unfair_treatment = "Treated unfairly at school",
+  unfair_treatment = "Treated unfairly at school (ever)",
   unsafe_streets = "Feels unsafe on the streets", drugs_nearby = "Drugs sold near home",
   witnessed_ipv = "Witnessed interparental violence (12 months)",
   victim_blame = "Victim-blaming attitude",
@@ -376,10 +376,9 @@ write.csv(class_summary, file.path(out_dir, "lca_class_summary.csv"), row.names 
 ind_order <- prof$indicator
 # Every Figure 2 label carries its reference period, taken from the codebook's
 # question wording: items asked as present-tense statements or hypotheticals
-# are marked "currently"; "treated unfairly" is asked as a lifetime experience.
+# are marked "currently".
 win_fix <- c(low_self_esteem = "Low self-esteem (currently)",
              low_caregiver_supp = "Low perceived caregiver support (currently)",
-             unfair_treatment = "Treated unfairly at school (ever)",
              unsafe_streets = "Feels unsafe on the streets (currently)",
              drugs_nearby = "Drugs sold near home (currently)",
              victim_blame = "Victim-blaming attitude (currently)",
