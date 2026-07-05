@@ -466,7 +466,7 @@ cov_disp <- cov_wide %>% group_by(covariate) %>%
   mutate(covariate = if_else(row_number() == 1, gsub("_", " ", covariate), "")) %>% ungroup()
 ft_s4 <- flex_pub(cov_disp,
   col_labels = list(covariate = "Characteristic", level = "Level"),
-  note = "Note: modal assignment over all 497 students; rows sum to 100. Global chi-squared tests appear below; simple modal-assignment comparisons typically attenuate associations, so the tests are read as approximate and conditional on the assignment, and no pattern should be read as characterizing any group.",
+  note = "Note: modal assignment over all 497 students; rows sum to 100. These raw cross-tabulations carry classification error, which attenuates contrasts; bias-adjusted composition estimates and global tests appear in Tables S4b-S4c, and no pattern should be read as characterizing any group.",
   num_cols = names(cov_disp)[-(1:2)]) %>% bold(j = "covariate", part = "body")
 save_tab(ft_s4, "tableS4_class_by_covariates")
 ft_s4
@@ -490,14 +490,95 @@ cov_tests <- map_dfr(unique(cov_raw$covariate), function(nm) {
          p_mc = signif(mc$p.value, 2), cramers_v = round(cramers_v(tab), 3),
          min_expected = round(min(pl$expected), 1))
 })
-ft_s4b <- flex_pub(cov_tests %>% mutate(p_mc = format(p_mc, scientific = FALSE)),
+# --- Bias-adjusted three-step correction (Vermunt 2010; Bolck et al. 2004). ---
+# Modal assignment is a fallible measurement of the true class. Its error rates
+# come straight from the model: D[k, s] = P(assigned class s | true class k),
+# estimated from the posteriors. Fixing D and re-estimating the class shares
+# within each characteristic level by maximum likelihood de-attenuates the
+# composition estimates; the global test is the likelihood-ratio test of
+# "shares vary by level" against "shares constant", df = (levels-1)*(K-1).
+postC <- mK$posterior[, ord]                     # posteriors, columns C1..CK
+Wm <- match(mK$predclass, ord)                   # modal class in C order
+Dm <- sapply(seq_len(K_sel), function(s) colSums(postC * (Wm == s)) / colSums(postC))
+
+# Fit the step-3 model: saturated class shares per covariate level, W as the
+# single fallible indicator with measurement probabilities fixed at D.
+ml3_fit <- function(zi, nlev, W, D) {
+  A <- t(D)                                      # A[s, k] = D[k, s]
+  nll <- function(theta) {
+    Mlog <- cbind(0, matrix(theta, nrow = nlev)) # logits per level, C1 reference
+    P <- exp(Mlog - apply(Mlog, 1, max)); P <- P / rowSums(P)
+    -sum(log(pmax(rowSums(P[zi, , drop = FALSE] * A[W, , drop = FALSE]), 1e-300)))
+  }
+  tab <- table(factor(zi, levels = 1:nlev), factor(W, levels = seq_len(ncol(D)))) + 0.5
+  p0 <- tab / rowSums(tab)                       # start at the modal proportions
+  th0 <- as.vector(log(p0[, -1, drop = FALSE] / p0[, 1]))
+  set.seed(2025)
+  fits <- lapply(1:8, function(s) {              # multiple starts guard the optimum
+    st <- if (s == 1) th0 else th0 + rnorm(length(th0), 0, 0.7)
+    optim(st, nll, method = "L-BFGS-B", lower = -15, upper = 15,
+          control = list(maxit = 2000))
+  })
+  best <- fits[[which.min(sapply(fits, `[[`, "value"))]]
+  Mlog <- cbind(0, matrix(best$par, nrow = nlev))
+  P <- exp(Mlog - apply(Mlog, 1, max)); P <- P / rowSums(P)
+  list(loglik = -best$value, P = P, spread = diff(range(sapply(fits, `[[`, "value"))))
+}
+ml3_test <- function(z, W, D) {
+  keep <- !is.na(z); zf <- factor(z[keep]); Wk <- W[keep]; zi <- as.integer(zf)
+  full <- ml3_fit(zi, nlevels(zf), Wk, D)
+  null <- ml3_fit(rep(1L, length(zi)), 1, Wk, D)
+  G2 <- 2 * (full$loglik - null$loglik)
+  list(n = sum(keep), levels = levels(zf), G2 = G2, df = (nlevels(zf) - 1) * (ncol(D) - 1),
+       p = pchisq(G2, (nlevels(zf) - 1) * (ncol(D) - 1), lower.tail = FALSE),
+       P = full$P, spread = max(full$spread, null$spread))
+}
+# Naive contingency-table likelihood-ratio G2 on modal classes: with an
+# error-free D (identity), the three-step statistic must reduce to this.
+naive_G2 <- function(z, W) {
+  keep <- !is.na(z); tab <- table(z[keep], W[keep])
+  E <- outer(rowSums(tab), colSums(tab)) / sum(tab)
+  2 * sum(ifelse(tab > 0, tab * log(tab / E), 0))
+}
+cov_cols <- setdiff(names(cov_df), "class")
+adj <- lapply(cov_cols, function(nm) ml3_test(as.character(cov_df[[nm]]), Wm, Dm))
+names(adj) <- cov_cols
+adj_id <- sapply(cov_cols, function(nm)                     # identity-D recovery
+  abs(ml3_test(as.character(cov_df[[nm]]), Wm, diag(K_sel))$G2 -
+      naive_G2(as.character(cov_df[[nm]]), Wm)))
+adj_tests <- tibble(covariate = gsub("_", " ", cov_cols),
+                    G2_adj = round(sapply(adj, `[[`, "G2"), 2),
+                    p_adj = signif(sapply(adj, `[[`, "p"), 2))
+cov_tests <- cov_tests %>% left_join(adj_tests, by = "covariate")
+
+ft_s4b <- flex_pub(cov_tests %>% mutate(p_mc = format(p_mc, scientific = FALSE),
+                                        p_adj = format(p_adj, scientific = FALSE)),
   col_labels = list(covariate = "Characteristic", n = "n", df = "df", X2 = "Chi-squared",
-                    p_mc = "p (Monte Carlo)", cramers_v = "Cramer's V", min_expected = "Min. expected cell"),
-  note = "Note: global tests of modal class by characteristic; Monte Carlo p-values from 10,000 seeded replicates; Cramer's V is the effect size (0.1 small, 0.3 moderate, 0.5 large); minimum expected cells all exceed 5. P-values are approximate and conditional on modal assignment; such comparisons typically attenuate associations, so large contrasts are unlikely to be artifacts, while null results remain ambiguous.",
-  num_cols = c("n", "df", "X2", "p_mc", "cramers_v", "min_expected"))
+                    p_mc = "p (Monte Carlo)", cramers_v = "Cramer's V", min_expected = "Min. expected cell",
+                    G2_adj = "G2 (bias-adjusted)", p_adj = "p (bias-adjusted)"),
+  note = "Note: chi-squared columns test modal class by characteristic (Monte Carlo p-values from 10,000 seeded replicates; Cramer's V is the effect size: 0.1 small, 0.3 moderate, 0.5 large; minimum expected cells all exceed 5). The bias-adjusted columns are maximum-likelihood three-step likelihood-ratio tests (Vermunt, 2010) that fix the assignment-error rates estimated from the model; with a saturated categorical characteristic and interior corrected estimates, this statistic coincides with the modal-table likelihood-ratio statistic, so the correction moves the composition estimates (Table S4c), not the global tests.",
+  num_cols = c("n", "df", "X2", "p_mc", "cramers_v", "min_expected", "G2_adj", "p_adj"))
 save_tab(ft_s4b, "tableS4b_class_covariate_tests")
 ft_s4b
 write.csv(cov_tests, file.path(out_dir, "lca_class_covariate_tests.csv"), row.names = FALSE)
+
+# Bias-adjusted composition table (the corrected analogue of Table S4).
+adj_comp <- bind_rows(lapply(cov_cols, function(nm) {
+  r <- adj[[nm]]
+  as.data.frame(round(100 * r$P, 1)) %>%
+    setNames(class_summary$class) %>%
+    mutate(covariate = gsub("_", " ", nm), level = r$levels, .before = 1)
+}))
+adj_disp <- adj_comp %>% group_by(covariate) %>%
+  mutate(covariate = if_else(row_number() == 1, covariate, "")) %>% ungroup()
+ft_s4c <- flex_pub(adj_disp,
+  col_labels = list(covariate = "Characteristic", level = "Level"),
+  note = "Note: bias-adjusted class shares per level (rows sum to 100), estimated by the maximum-likelihood three-step method: the classification-error matrix D (P(assigned | true), from the model's posteriors) is fixed and the shares are re-estimated by maximum likelihood (Bolck, Croon and Hagenaars, 2004; Vermunt, 2010; Bakk, Tekle and Vermunt, 2013). These estimates correct the attenuation in the modal cross-tabulation (Table S4); global tests appear in Table S4b. No pattern should be read as characterizing any group.",
+  num_cols = class_summary$class) %>% bold(j = "covariate", part = "body")
+save_tab(ft_s4c, "tableS4c_bias_adjusted_composition")
+ft_s4c
+write.csv(adj_comp, file.path(out_dir, "lca_bias_adjusted_composition.csv"), row.names = FALSE)
+write.csv(as.data.frame(round(Dm, 4)), file.path(out_dir, "lca_classification_error_matrix.csv"))
 
 # Standardized residuals for ethnicity (locates the driving cells).
 tabE <- with(cov_raw %>% filter(covariate == "Ethnicity"), table(level, class))
@@ -505,12 +586,24 @@ eth_res <- round(suppressWarnings(chisq.test(tabE, correct = FALSE))$stdres, 2)
 kable(eth_res, caption = "Standardized residuals, ethnicity by class (|value| > 2 marks cells driving the association).")
 write.csv(as.data.frame.matrix(eth_res), file.path(out_dir, "ethnicity_class_stdres.csv"))
 
+# The headline de-attenuation cell: girls in the distress class, adjusted vs modal.
+girls_adj <- adj_comp %>% filter(covariate == "Sex", level == "Female") %>% pull(2 + 2)
+girls_mod <- cov_wide %>% filter(covariate == "Sex", level == "Female") %>% pull(C2)
+
 chk5b <- tibble(
   check = c("five characteristics tested", "all minimum expected cells >= 5",
-            "sex and sexual identity significant at p < 0.001"),
+            "sex and sexual identity significant at p < 0.001",
+            "D rows sum to 1", "identity-D three-step reduces to the naive G2",
+            "optimum stable across starts",
+            "bias-adjusted tests match the modal significance pattern",
+            "girls' distress share de-attenuates upward"),
   pass = c(nrow(cov_tests) == 5, all(cov_tests$min_expected >= 5),
-           all(cov_tests$p_mc[cov_tests$covariate %in% c("Sex", "Sexual identity")] < 0.001)))
-kable(chk5b, caption = "Verification check 5b. Class-covariate tests. Every row must read TRUE.")
+           all(cov_tests$p_mc[cov_tests$covariate %in% c("Sex", "Sexual identity")] < 0.001),
+           all(abs(rowSums(Dm) - 1) < 1e-10), all(adj_id < 0.01),
+           all(sapply(adj, `[[`, "spread") < 1e-3),
+           all((cov_tests$p_adj < 0.05) == (cov_tests$p_mc < 0.05)),
+           girls_adj >= girls_mod))
+kable(chk5b, caption = "Verification check 5b. Class-covariate tests and bias adjustment. Every row must read TRUE.")
 stopifnot(all(chk5b$pass))
 ```
 
